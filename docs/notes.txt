@@ -1,0 +1,4 @@
+# GOAL OF THE SYSTEM DESIGN
+The idea is to build a fail-safe system that is not paranoid on every small change but can tell
+harmless changes(accept them) apart from dangerous changes(quarantine them)
+
