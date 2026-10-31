@@ -164,11 +164,17 @@ class SyncOrchestrator:
 
     def sync(self, tenant_name: str, resource: Resource, *, full: bool = False) -> SyncReport:
         run_id = uuid.uuid4().hex[:12]
+        # Every log line emitted during this run (from any module) carries these fields.
+        with structlog.contextvars.bound_contextvars(
+            run_id=run_id, tenant=tenant_name, resource=str(resource)
+        ):
+            return self._sync(run_id, tenant_name, resource, full)
+
+    def _sync(self, run_id: str, tenant_name: str, resource: Resource, full: bool) -> SyncReport:
         vendor = self.adapter.vendor
         with self._sessions() as session:
             tenant = self._load_tenant(session, tenant_name)
             report = SyncReport(run_id, tenant.name, resource, self.adapter.mapping_version)
-            run_log = log.bind(run_id=run_id, tenant=tenant.name, resource=str(resource))
 
             state = breaker.get_or_create(session, vendor, tenant.id, resource)
             session.commit()
@@ -177,13 +183,13 @@ class SyncOrchestrator:
                 report.halt_reason = f"circuit breaker OPEN ({state.reason_code})"
                 if state.incident_id:
                     report.note_incident(state.incident_id)
-                run_log.warning("sync.blocked", reason=state.reason_code)
+                log.warning("sync.blocked", reason=state.reason_code)
                 return report
 
             checkpoint = self._acquire_lock(session, tenant, resource, run_id, full)
-            run_log.info("sync.started", resume_cursor=checkpoint.cursor, full=full)
+            log.info("sync.started", resume_cursor=checkpoint.cursor, full=full)
             try:
-                self._run_pages(session, tenant, resource, checkpoint, report, run_log)
+                self._run_pages(session, tenant, resource, checkpoint, report)
             finally:
                 session.rollback()
                 session.execute(
@@ -195,7 +201,7 @@ class SyncOrchestrator:
 
             if report.status is SyncStatus.COMPLETED and resource is Resource.PATIENT:
                 report.pending_resolved = self._retry_pending(session, tenant, report)
-            run_log.info("sync.finished", **_summary(report))
+            log.info("sync.finished", **_summary(report))
         return report
 
     def _load_tenant(self, session: Session, name: str) -> TenantRef:
@@ -260,7 +266,6 @@ class SyncOrchestrator:
         resource: Resource,
         checkpoint: SyncCheckpoint,
         report: SyncReport,
-        run_log: Any,
     ) -> None:
         vendor = self.adapter.vendor
         cursor = checkpoint.cursor
@@ -276,7 +281,7 @@ class SyncOrchestrator:
                 sleep=self._sleep,
                 now=self._clock,
                 rand=self._rand,
-                on_retry=partial(_note_retry, report, run_log),
+                on_retry=partial(_note_retry, report),
             )
             if not fetched.ok:
                 self._handle_fetch_failure(session, tenant, resource, cursor, fetched, report)
@@ -304,7 +309,7 @@ class SyncOrchestrator:
             session.commit()
             if observation.new_event is not None:
                 report.drift_events.append(observation.new_event.id)
-                run_log.warning("drift.detected", diff=observation.new_event.diff)
+                log.warning("drift.detected", diff=observation.new_event.diff)
             drift_diff = observation.diff.as_dict() if observation.diff else None
 
             bad = 0
@@ -794,6 +799,11 @@ class SyncOrchestrator:
                 if error_code is None or error_code in row.error_codes
             ]
 
+            opened_before = set(
+                session.scalars(
+                    select(Incident.id).where(Incident.status == IncidentStatus.OPEN)
+                ).all()
+            )
             touched_incidents: list[int] = []
             touched_streams: set[tuple[int, str]] = set()
             for row in rows:
@@ -806,12 +816,19 @@ class SyncOrchestrator:
                 else:
                     self._replay_record(session, tenant, row, report)
 
-            report.incidents_closed = incidents.close_if_drained(session, touched_incidents)
+            incidents.close_if_drained(session, touched_incidents)
             for tenant_id, resource_name in sorted(touched_streams):
                 if self._reset_if_drained(session, tenant_id, Resource(resource_name)):
                     tenant = self._tenant_by_id(session, tenant_id)
                     report.breakers_reset.append(f"{tenant.name}/{resource_name}")
             session.commit()
+            report.incidents_closed = sorted(
+                session.scalars(
+                    select(Incident.id).where(
+                        Incident.id.in_(opened_before), Incident.status == IncidentStatus.CLOSED
+                    )
+                ).all()
+            )
         log.info("replay.finished", **report.as_dict())
         return report
 
@@ -904,9 +921,9 @@ class SyncOrchestrator:
         return TenantRef(tenant.id, tenant.name, tenant.vendor, dict(tenant.locator))
 
 
-def _note_retry(report: SyncReport, run_log: Any, attempt: int, detail: str, delay: float) -> None:
+def _note_retry(report: SyncReport, attempt: int, detail: str, delay: float) -> None:
     report.retries += 1
-    run_log.warning("fetch.retry", attempt=attempt, detail=detail, delay=round(delay, 3))
+    log.warning("fetch.retry", attempt=attempt, detail=detail, delay=round(delay, 3))
 
 
 def _summary(report: SyncReport) -> dict[str, Any]:
