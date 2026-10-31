@@ -19,6 +19,7 @@ SCENARIOS = (
     "malformed",
     "malformed_always",
     "flaky",
+    "orphan",
 )
 
 
@@ -51,5 +52,8 @@ def transform(scenario: str, resource: str, records: list[dict]) -> list:
 
     elif scenario == "malformed" and resource == "patients":
         rows[3] = None
+
+    elif scenario == "orphan" and resource == "appointments":
+        rows[0]["patient_id"] = "P-9999"  # a patient this practice never returns
 
     return rows

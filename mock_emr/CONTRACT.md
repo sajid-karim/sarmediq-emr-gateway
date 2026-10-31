@@ -87,6 +87,7 @@ GET  /_admin/scenario
 | `malformed` | every 3rd call → `200` with an HTML body; patient index 3 is `null` |
 | `malformed_always` | every call → `200` with an HTML body |
 | `flaky` | calls 1, 5, 9… → `503`; calls 2, 6, 10… respond after `slow_seconds` |
+| `orphan` | appointment A-2001 references patient `P-9999`, which is never returned |
 
 Fixtures: two practices (`practice_a`, `practice_b`) with 25 patients, 25 appointments and
 15 reports each, sharing ID ranges. All fixtures are "last modified" on 2026-10-01, so an

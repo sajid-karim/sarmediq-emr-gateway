@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     batch_min_records: int = 10
     batch_max_bad_ratio: float = 0.2
     breaker_failure_threshold: int = 3
+    breaker_cooldown_seconds: int = 300
     pending_max_attempts: int = 5
     sync_lock_ttl_seconds: int = 900
 

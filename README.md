@@ -18,7 +18,7 @@ Requires Python 3.12. No paid services, no external network.
 
 ```bash
 make install     # venv + dependencies
-make test        # 94 unit + integration tests (~40 s; integration tests start the mock on a real port)
+make test        # 107 unit + integration tests (~35 s; integration tests start the mock on a real port)
 make demo        # the whole story in one command: baseline -> changes -> breaking change -> fix -> replay
 ```
 
@@ -56,7 +56,7 @@ e.g. `EMR_DATABASE_URL`, `EMR_VENDOR_BASE_URL`, `EMR_ACME_MAPPING_VERSION`, `EMR
 
 | Method & path | Purpose |
 |---|---|
-| `POST /sync/{patient\|appointment\|clinical_report}?tenant=&full=` | Run one sync. `200` with a SyncReport; `503` if the breaker is open; `409` if already running |
+| `POST /sync/{patient\|appointment\|clinical_report}?tenant=&full=` | Run one sync. `200` with a SyncReport; `503` + `Retry-After` if the breaker is open; `409` if already running |
 | `GET /health` | Breakers, open incidents by severity, quarantine / pending / DLQ depth, new drift events |
 | `GET /incidents?status=open\|closed\|all` | Deduplicated incidents |
 | `GET /drift`, `POST /drift/{id}/promote` | Detected schema changes; promote a reviewed shape to baseline |
@@ -123,9 +123,11 @@ Key decisions (full reasoning in the architecture doc):
 | `pagination` (cursor loops) | behavioural | loop detected, run stops, no duplicates | `test_pagination_loop_is_detected` |
 | `malformed` / `malformed_always` | malformed payloads | HTML body kept + retried; `null` element quarantined; persistent → request DLQ | `test_resilience.py` |
 | `flaky` (503 + slow) | transient | real timeout + retries, no duplicates | `test_flaky_…` |
+| `orphan` (appointment → unknown patient) | referential | waits as pending; escalated to `ORPHAN_REFERENCE` quarantine after 5 patient syncs | `test_child_whose_parent_never_arrives_…` |
 
 Also tested: crash mid-run and resume from the checkpoint, tenant isolation, child-before-parent
-(pending then resolved), run lock and stale-lock takeover, replay idempotency, HTTP API end to end.
+(pending then resolved), run lock and stale-lock takeover, replay idempotency, breaker HALF_OPEN
+probe (success and failure), HTTP API end to end.
 
 ## README questions
 
@@ -170,8 +172,8 @@ starve the others. (Architecture doc §10.)
 
 **5. What would you improve before deploying this into production?**
 PHI controls (encryption at rest for raw payloads, retention, log redaction, access audit);
-Postgres with Alembic migrations; the queue/worker split above with shared rate limiting and a
-HALF_OPEN breaker probe; real alerting (metrics such as quarantine depth, drift rate and sync lag
+Postgres with Alembic migrations; the queue/worker split above with shared rate limiting and breaker state
+in Redis; real alerting (metrics such as quarantine depth, drift rate and sync lag
 into Prometheus/Alertmanager) and tracing; secrets management and OAuth token refresh; a review UI
 for quarantine with alias-suggestion approval; a parent incident that rolls up per-tenant incidents
 for vendor-wide breaks; deletion handling; per-vendor contract canaries; load and chaos testing;
@@ -185,8 +187,9 @@ Built for clarity within the time box; designed for the rest (architecture doc �
   previous page); throughput in production comes from more workers, not async. `def` endpoints run
   in FastAPI's threadpool, so a running sync doesn't block other requests.
 - **SQLite** (WAL mode) for zero-setup review; the SQLAlchemy layer swaps to Postgres by DSN.
-- **Breaker without HALF_OPEN auto-probe.** An OPEN breaker closes after a successful replay or a
-  manual reset.
+- **Breaker recovery.** After a cooldown (`EMR_BREAKER_COOLDOWN_SECONDS`, default 300) the next
+  sync runs as a HALF_OPEN probe: success closes the breaker, any failure re-opens it. A blocked
+  sync returns `503` with `Retry-After`. A successful replay or a manual reset also closes it.
 - **The first shape ever seen becomes the drift baseline.** Production would seed it from the
   documented contract.
 - Not built: token-bucket throttling, alias-suggestion engine, second vendor adapter, deletions,

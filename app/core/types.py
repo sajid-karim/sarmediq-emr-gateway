@@ -50,6 +50,7 @@ class DlqStatus(StrEnum):
 class BreakerState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 class DriftStatus(StrEnum):

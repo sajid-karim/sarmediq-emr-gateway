@@ -58,7 +58,7 @@ def health(session: Session = Depends(get_session)) -> dict[str, Any]:
     def count(model: Any, *where: Any) -> int:
         return session.scalar(select(func.count()).select_from(model).where(*where)) or 0
 
-    any_open = any(b["state"] == BreakerState.OPEN for b in breakers)
+    any_open = any(b["state"] != BreakerState.CLOSED for b in breakers)
     return {
         "status": "degraded" if any_open or open_incidents.get("critical") else "ok",
         "breakers": breakers,

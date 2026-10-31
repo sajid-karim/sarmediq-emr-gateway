@@ -1,7 +1,7 @@
 """Transport behaviour against the real mock server: 429, 503, timeouts, HTML bodies."""
 
 from app.core.errors import ErrorCode
-from app.core.types import BreakerState, DlqStatus, QuarantineStatus, Resource
+from app.core.types import BreakerState, DlqStatus, IncidentStatus, QuarantineStatus, Resource
 from app.db.models import CircuitState, Incident, PatientRow, Quarantine, RawPayload, RequestDLQ
 from app.sync.orchestrator import SyncStatus
 
@@ -57,6 +57,7 @@ def test_persistent_html_goes_to_request_dlq_and_is_refetched_later(gateway):
     assert recovered.status is SyncStatus.COMPLETED and recovered.inserted == 25
     assert gateway.all(RequestDLQ)[0].status == DlqStatus.REFETCHED
     assert gateway.all(CircuitState)[0].consecutive_failures == 0
+    assert gateway.all(Incident)[0].status == IncidentStatus.CLOSED
 
 
 def test_repeated_upstream_failures_eventually_open_the_breaker(gateway):

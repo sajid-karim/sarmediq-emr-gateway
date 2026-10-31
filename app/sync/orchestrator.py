@@ -71,6 +71,15 @@ ISSUE_SEVERITY = {
 # Incidents that describe a run-level halt; replay that drains the quarantine closes them.
 RUN_LEVEL_CODES = (ErrorCode.ENVELOPE_CHANGED, ErrorCode.BATCH_THRESHOLD)
 
+# Incidents about the stream itself. A run that completes proves they are over.
+STREAM_CODES = (
+    *RUN_LEVEL_CODES,
+    ErrorCode.UPSTREAM_UNAVAILABLE,
+    ErrorCode.MALFORMED_RESPONSE,
+    ErrorCode.CONTRACT_OR_AUTH,
+    ErrorCode.PAGINATION_LOOP,
+)
+
 
 class SyncStatus(StrEnum):
     COMPLETED = "completed"
@@ -94,6 +103,8 @@ class SyncReport:
     mapping_version: int
     status: SyncStatus = SyncStatus.COMPLETED
     halt_reason: str | None = None
+    breaker_probe: bool = False
+    retry_after_seconds: int | None = None
     pages: int = 0
     fetched: int = 0
     inserted: int = 0
@@ -177,14 +188,19 @@ class SyncOrchestrator:
             report = SyncReport(run_id, tenant.name, resource, self.adapter.mapping_version)
 
             state = breaker.get_or_create(session, vendor, tenant.id, resource)
+            now = self._clock()
+            cooldown = self._settings.breaker_cooldown_seconds
+            allowed = breaker.allow_run(state, now, cooldown)
             session.commit()
-            if breaker.is_open(state):
+            if not allowed:
                 report.status = SyncStatus.BLOCKED
                 report.halt_reason = f"circuit breaker OPEN ({state.reason_code})"
+                report.retry_after_seconds = breaker.seconds_until_probe(state, now, cooldown)
                 if state.incident_id:
                     report.note_incident(state.incident_id)
                 log.warning("sync.blocked", reason=state.reason_code)
                 return report
+            report.breaker_probe = state.state == BreakerState.HALF_OPEN
 
             checkpoint = self._acquire_lock(session, tenant, resource, run_id, full)
             log.info("sync.started", resume_cursor=checkpoint.cursor, full=full)
@@ -360,6 +376,7 @@ class SyncOrchestrator:
         checkpoint.last_success_started_at = checkpoint.run_started_at
         checkpoint.run_updated_since = None
         breaker.record_success(breaker.get_or_create(session, vendor, tenant.id, resource))
+        self._close_stream_incidents(session, tenant.id, resource, STREAM_CODES, "run completed")
         session.commit()
 
     # --------------------------------------------------------------------- one record
@@ -736,9 +753,10 @@ class SyncOrchestrator:
         self, session: Session, tenant: TenantRef, resource: Resource, row: Any, report: SyncReport
     ) -> None:
         spec = self.adapter.contract(resource)
+        vendor_path = next(f.path for f in spec.fields if f.name == spec.parent_field)
         issue = MappingIssue(
             ErrorCode.ORPHAN_REFERENCE,
-            spec.parent_field or "",
+            vendor_path,
             Criticality.CRITICAL,
             f"existing {spec.parent}",
             row.waiting_on_vendor_id,
@@ -890,22 +908,35 @@ class SyncOrchestrator:
         )
         if still_open is not None:
             return False
-        for incident in session.scalars(
-            select(Incident).where(
-                Incident.tenant_id == tenant_id,
-                Incident.resource == resource,
-                Incident.status == IncidentStatus.OPEN,
-                Incident.error_code.in_(RUN_LEVEL_CODES),
-            )
-        ):
-            incidents.close_incident(incident, "replay drained the quarantine")
+        self._close_stream_incidents(
+            session, tenant_id, resource, RUN_LEVEL_CODES, "replay drained the quarantine"
+        )
         state = breaker.get_or_create(session, self.adapter.vendor, tenant_id, resource)
-        if state.state == BreakerState.OPEN and state.reason_code in RUN_LEVEL_CODES:
+        tripped = state.state in (BreakerState.OPEN, BreakerState.HALF_OPEN)
+        if tripped and state.reason_code in RUN_LEVEL_CODES:
             breaker.reset(state, "replay drained the quarantine")
             return True
         return False
 
     # -------------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _close_stream_incidents(
+        session: Session,
+        tenant_id: int,
+        resource: Resource,
+        codes: tuple[ErrorCode, ...],
+        reason: str,
+    ) -> None:
+        for incident in session.scalars(
+            select(Incident).where(
+                Incident.tenant_id == tenant_id,
+                Incident.resource == resource,
+                Incident.status == IncidentStatus.OPEN,
+                Incident.error_code.in_(codes),
+            )
+        ):
+            incidents.close_incident(incident, reason)
 
     def _load_record(
         self, session: Session, raw_payload_id: int, resource: Resource, index: int

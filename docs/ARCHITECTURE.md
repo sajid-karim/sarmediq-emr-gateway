@@ -1270,22 +1270,22 @@ The assignment asks us to prioritise "the parts that best demonstrate production
  BUILD (in this order)                                  DOCUMENT ONLY
  ─────────────────────────────────────────────          ─────────────────────────────────────
   1. Mock EMR: v1 contract, fixtures, scenarios          · token-bucket throttle (§5)
-  2. Canonical models + Acme adapter                     · HALF_OPEN auto-probe (manual
-     (client, contract, mapper, mapping_version)           breaker reset is built)
-  3. tenant, raw_payload, idempotent upsert,             · alias-suggestion engine (§4)
+  2. Canonical models + Acme adapter                     · alias-suggestion engine (§4)
+     (client, contract, mapper, mapping_version)
+  3. tenant, raw_payload, idempotent upsert,
      record_version, processing_ledger                   · second vendor adapter
   4. Classifier, quarantine (record + page),             · Postgres + Alembic migrations
      incidents, pending_record                           · queue, workers, Redis, object
   5. Drift fingerprint, drift_event, promote               storage (§10)
   6. Retries, backoff, Retry-After, malformed            · parent incidents across tenants
      bodies, request_dlq                                 · PHI controls, metrics, tracing
-  7. Breaker (CLOSED / OPEN + manual reset),
+  7. Breaker (CLOSED / OPEN / HALF_OPEN probe, reset),
      batch health, checkpoint, pagination-loop check
   8. Replay (record + page)
   9. Ops + read endpoints, structured JSON logs
  10. Tests (§14) and the README with the five answers
 
- STRETCH, if time is left: docker-compose, HALF_OPEN probe
+ STRETCH, also built: docker-compose, HALF_OPEN probe
 ```
 
 ---
@@ -1305,8 +1305,10 @@ Decisions made while building (2026-11-01). Where they differ from an earlier se
 | 7 | `POST /sync/...?full=true` ignores `updated_since`. Default is incremental. | Operators (and the demo) need a forced full re-read. | `sync_router.py` |
 | 8 | The run lock is `run_id` + `heartbeat_at` on `sync_checkpoint`, taken by compare-and-set; a lock older than the TTL (15 min) is taken over. Second caller gets `409`. | A crashed worker must not lock a stream forever. | `orchestrator._acquire_lock` |
 | 9 | `raw_payload.body` is bytes, and stores 2xx bodies and non-retryable 4xx bodies (not 429/5xx bodies). | Malformed bodies aren't valid JSON; we keep what we act on as evidence. | `app/db/models.py` |
-| 10 | Breaker: data-level failures (envelope, batch threshold, pagination loop) and `CONTRACT_OR_AUTH` trip immediately; upstream failures trip after 3 consecutive failed runs. Replay that drains the quarantine closes envelope/batch incidents and resets the breaker. HALF_OPEN is not built. | Contract breaks need a human now; outages often heal by themselves. | `app/core/breaker.py`, `orchestrator.replay` |
+| 10 | Breaker: data-level failures (envelope, batch threshold, pagination loop) and `CONTRACT_OR_AUTH` trip immediately; upstream failures trip after 3 consecutive failed runs. Replay that drains the quarantine closes envelope/batch incidents and resets the breaker. After `EMR_BREAKER_COOLDOWN_SECONDS` (300) the next sync is a HALF_OPEN probe: completes → CLOSED, any failure → OPEN with a fresh cooldown. A blocked sync returns `503` with `Retry-After`. | Contract breaks need a human now; outages often heal by themselves. | `app/core/breaker.py`, `orchestrator.replay` |
 | 11 | A fix is deployed as `EMR_ACME_MAPPING_VERSION=2`: v2 adds the approved aliases (`birth_date`, `identifiers[system=MRN]`) and the `{data, meta}` envelope. v1 behaviour is unchanged. | Shows recovery as a real, versioned code path. | `app/vendors/acme/mapper.py`, `adapter.py` |
 | 12 | Pending records are retried after each patient sync and escalated to `ORPHAN_REFERENCE` after 5 attempts. | Timing problems resolve themselves; permanent ones become incidents. | `orchestrator._retry_pending` |
 | 13 | Mock adds `malformed_always` (HTML on every call) to exercise the request DLQ. | The transient `malformed` scenario always recovers. | `mock_emr/scenarios.py` |
 | 14 | SQLite runs with `synchronous=NORMAL` alongside WAL. | Safe with WAL and avoids an fsync per record commit. | `app/db/session.py` |
+| 15 | Mock adds `orphan` (appointment A-2001 references a patient never returned) to exercise pending → `ORPHAN_REFERENCE` escalation. | The escalation path needs a real trigger to be tested. | `mock_emr/scenarios.py` |
+| 16 | A run that **completes** closes the stream's open run-level incidents (`UPSTREAM_UNAVAILABLE`, `MALFORMED_RESPONSE`, `CONTRACT_OR_AUTH`, `PAGINATION_LOOP`, `ENVELOPE_CHANGED`, `BATCH_THRESHOLD`). Record-level incidents stay open until their quarantined records drain. | A finished run is proof the stream recovered; leaving those open would keep `/health` degraded forever. | `orchestrator._close_stream_incidents` |

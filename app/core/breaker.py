@@ -1,9 +1,17 @@
 """Circuit breaker per (vendor, tenant, resource), persisted so restarts don't forget (§5).
 
 Trips on HTTP failures *and* on data failures (envelope change, batch threshold, loops):
-a vendor returning 200 with garbage is still broken. HALF_OPEN probing is documented,
-not built; an OPEN breaker is closed by a successful replay or a manual reset.
+a vendor returning 200 with garbage is still broken.
+
+    CLOSED --trip--> OPEN --cooldown elapsed--> HALF_OPEN (one probe run)
+    HALF_OPEN --run completes--> CLOSED
+    HALF_OPEN --any failure----> OPEN (cooldown restarts)
+
+A successful replay or a manual reset also closes it.
 """
+
+import math
+from datetime import datetime, timedelta
 
 import structlog
 from sqlalchemy import select
@@ -41,6 +49,24 @@ def is_open(state: CircuitState) -> bool:
     return state.state == BreakerState.OPEN
 
 
+def seconds_until_probe(state: CircuitState, now: datetime, cooldown_seconds: int) -> int:
+    if state.opened_at is None:
+        return cooldown_seconds
+    remaining = state.opened_at + timedelta(seconds=cooldown_seconds) - now
+    return max(0, math.ceil(remaining.total_seconds()))
+
+
+def allow_run(state: CircuitState, now: datetime, cooldown_seconds: int) -> bool:
+    """CLOSED and HALF_OPEN let a run through; OPEN only after the cooldown, as a probe."""
+    if state.state != BreakerState.OPEN:
+        return True
+    if seconds_until_probe(state, now, cooldown_seconds) > 0:
+        return False
+    state.state = BreakerState.HALF_OPEN
+    log.info("breaker.half_open", resource=state.resource, tenant_id=state.tenant_id)
+    return True
+
+
 def trip(state: CircuitState, code: ErrorCode, incident_id: int | None) -> None:
     state.state = BreakerState.OPEN
     state.opened_at = utcnow()
@@ -52,15 +78,18 @@ def trip(state: CircuitState, code: ErrorCode, incident_id: int | None) -> None:
 def record_failure(
     state: CircuitState, code: ErrorCode, incident_id: int | None, threshold: int
 ) -> bool:
-    """Transient failures trip the breaker only after `threshold` consecutive failed runs."""
+    """Transient failures trip the breaker after `threshold` consecutive failed runs,
+    or immediately if this run was the HALF_OPEN probe."""
     state.consecutive_failures += 1
-    if state.consecutive_failures >= threshold:
+    if state.state == BreakerState.HALF_OPEN or state.consecutive_failures >= threshold:
         trip(state, code, incident_id)
         return True
     return False
 
 
 def record_success(state: CircuitState) -> None:
+    if state.state == BreakerState.HALF_OPEN:
+        reset(state, "probe run succeeded")
     state.consecutive_failures = 0
 
 

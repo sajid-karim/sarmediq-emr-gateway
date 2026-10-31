@@ -113,3 +113,10 @@ def test_flaky_returns_503_first(client):
 
 def test_unknown_scenario_rejected(client):
     assert client.post("/_admin/scenario", json={"scenario": "nope"}).status_code == 400
+
+
+def test_orphan_points_one_appointment_at_a_missing_patient(client):
+    use(client, "orphan")
+    rows = client.get("/practice_a/appointments").json()
+    assert rows[0]["patient_id"] == "P-9999"
+    assert all(r["patient_id"] != "P-9999" for r in rows[1:])

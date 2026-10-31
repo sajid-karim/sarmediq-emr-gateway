@@ -21,5 +21,8 @@ def run_sync(
         raise HTTPException(status_code=404, detail=f"unknown tenant {exc}") from exc
     except SyncInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    status_code = 503 if report.status is SyncStatus.BLOCKED else 200
-    return JSONResponse(report.as_dict(), status_code=status_code)
+    if report.status is SyncStatus.BLOCKED:
+        # Tell callers when the breaker allows a probe: the courtesy we expect from vendors.
+        headers = {"Retry-After": str(report.retry_after_seconds or 0)}
+        return JSONResponse(report.as_dict(), status_code=503, headers=headers)
+    return JSONResponse(report.as_dict())
