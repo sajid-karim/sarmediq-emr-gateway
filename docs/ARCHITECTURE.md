@@ -421,6 +421,9 @@ One vocabulary, used in quarantine rows, incidents and logs.
 | `ORPHAN_REFERENCE` | pending record gave up waiting | record quarantine |
 | `PAGINATION_LOOP` | ⑨ cursor repeated within a run | incident, run stops |
 | `BATCH_THRESHOLD` | ⑧ batch health | breaker OPEN |
+| `UPSTREAM_UNAVAILABLE` | ① fetch: 5xx / 429 / timeout after all retries | `request_dlq` + incident; breaker OPEN after 3 failed runs |
+| `MISSING_IMPORTANT_FIELD` | classifier | written as DEGRADED, warning incident |
+| `MISSING_OPTIONAL_FIELD` | classifier | written as DEGRADED, info incident |
 
 ### Why
 
@@ -1284,3 +1287,26 @@ The assignment asks us to prioritise "the parts that best demonstrate production
 
  STRETCH, if time is left: docker-compose, HALF_OPEN probe
 ```
+
+---
+
+## 16. Implementation notes: where the code refines this design
+
+Decisions made while building (2026-11-01). Where they differ from an earlier section, this section wins.
+
+| # | Refinement | Why | Code |
+|---|---|---|---|
+| 1 | The adapter makes **one HTTP attempt**; the retry policy lives in the core (§2, §5 said "vendor client + retries"). | Raw-before-parse must hold on *every* attempt, including malformed bodies; retry rules are the same for every vendor. | `app/core/retry.py`, `app/vendors/acme/client.py` |
+| 2 | New error codes `UPSTREAM_UNAVAILABLE`, `MISSING_IMPORTANT_FIELD`, `MISSING_OPTIONAL_FIELD`; incident severity comes from field criticality (critical / warning / info). | Every outcome needs a code; degraded writes still deserve a visible, lower-severity signal. | `app/core/errors.py` |
+| 3 | **Absence is not deletion.** A field whose key the vendor stops sending keeps its stored value (§4 point 5 said "write null"). A key sent as `null` still clears it. | Overwriting middle names with null because the vendor regressed would be silent data loss. | `upsert_record(keep_existing=…)` |
+| 4 | A drift is identified by **what changed** (the diff's hash), not the page's hash. The first shape seen becomes the baseline. | The same vendor change on many pages and tenants yields one event; data-dependent nulls don't create false drifts. | `app/core/drift.py` |
+| 5 | Quarantine ↔ incident is **many-to-many** (`quarantine_incident`). | A record missing both `dob` and `mrn` belongs to two incidents; each closes when *its* records drain. | `app/db/models.py` |
+| 6 | **One open quarantine row per broken record**, not per fetch; a later valid version resolves it ("superseded"). | Re-syncing a broken vendor must not multiply quarantine rows. | `app/core/quarantine.py` |
+| 7 | `POST /sync/...?full=true` ignores `updated_since`. Default is incremental. | Operators (and the demo) need a forced full re-read. | `sync_router.py` |
+| 8 | The run lock is `run_id` + `heartbeat_at` on `sync_checkpoint`, taken by compare-and-set; a lock older than the TTL (15 min) is taken over. Second caller gets `409`. | A crashed worker must not lock a stream forever. | `orchestrator._acquire_lock` |
+| 9 | `raw_payload.body` is bytes, and stores 2xx bodies and non-retryable 4xx bodies (not 429/5xx bodies). | Malformed bodies aren't valid JSON; we keep what we act on as evidence. | `app/db/models.py` |
+| 10 | Breaker: data-level failures (envelope, batch threshold, pagination loop) and `CONTRACT_OR_AUTH` trip immediately; upstream failures trip after 3 consecutive failed runs. Replay that drains the quarantine closes envelope/batch incidents and resets the breaker. HALF_OPEN is not built. | Contract breaks need a human now; outages often heal by themselves. | `app/core/breaker.py`, `orchestrator.replay` |
+| 11 | A fix is deployed as `EMR_ACME_MAPPING_VERSION=2`: v2 adds the approved aliases (`birth_date`, `identifiers[system=MRN]`) and the `{data, meta}` envelope. v1 behaviour is unchanged. | Shows recovery as a real, versioned code path. | `app/vendors/acme/mapper.py`, `adapter.py` |
+| 12 | Pending records are retried after each patient sync and escalated to `ORPHAN_REFERENCE` after 5 attempts. | Timing problems resolve themselves; permanent ones become incidents. | `orchestrator._retry_pending` |
+| 13 | Mock adds `malformed_always` (HTML on every call) to exercise the request DLQ. | The transient `malformed` scenario always recovers. | `mock_emr/scenarios.py` |
+| 14 | SQLite runs with `synchronous=NORMAL` alongside WAL. | Safe with WAL and avoids an fsync per record commit. | `app/db/session.py` |
