@@ -13,7 +13,10 @@ def client():
 
 
 def use(client, scenario):
-    assert client.post("/_admin/scenario", json={"scenario": scenario, "slow_seconds": 0}).status_code == 200
+    assert (
+        client.post("/_admin/scenario", json={"scenario": scenario, "slow_seconds": 0}).status_code
+        == 200
+    )
 
 
 def walk(client, practice, resource):

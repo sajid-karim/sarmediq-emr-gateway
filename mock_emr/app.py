@@ -85,7 +85,9 @@ def list_records(
     call = state.next_call((practice_id, resource))
 
     if scenario == "rate_limit" and call % 3 == 0:
-        return JSONResponse({"error": "rate limited"}, status_code=429, headers={"Retry-After": "1"})
+        return JSONResponse(
+            {"error": "rate limited"}, status_code=429, headers={"Retry-After": "1"}
+        )
     if scenario == "flaky":
         if call % 4 == 1:
             return JSONResponse({"error": "service unavailable"}, status_code=503)
@@ -106,6 +108,8 @@ def list_records(
         next_cursor = cursor
 
     if scenario == "envelope":
-        return JSONResponse({"data": page, "meta": {"next_cursor": next_cursor, "count": len(page)}})
+        return JSONResponse(
+            {"data": page, "meta": {"next_cursor": next_cursor, "count": len(page)}}
+        )
     headers = {"X-Next-Cursor": next_cursor} if next_cursor else {}
     return JSONResponse(page, headers=headers)
