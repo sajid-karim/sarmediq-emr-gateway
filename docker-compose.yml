@@ -1,0 +1,18 @@
+services:
+  mock-emr:
+    build: .
+    command: ["uvicorn", "mock_emr.app:app", "--host", "0.0.0.0", "--port", "9000"]
+    ports: ["${MOCK_PORT:-9000}:9000"]
+
+  gateway:
+    build: .
+    environment:
+      EMR_DATABASE_URL: sqlite:////data/gateway.db
+      EMR_VENDOR_BASE_URL: http://mock-emr:9000
+      EMR_ACME_MAPPING_VERSION: ${EMR_ACME_MAPPING_VERSION:-1}
+    ports: ["${GATEWAY_PORT:-8000}:8000"]
+    volumes: ["gateway-data:/data"]
+    depends_on: [mock-emr]
+
+volumes:
+  gateway-data:
