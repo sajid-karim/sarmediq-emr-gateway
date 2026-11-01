@@ -134,3 +134,9 @@ def test_orphan_points_one_appointment_at_a_missing_patient(client):
     rows = client.get("/practice_a/appointments").json()
     assert rows[0]["patient_id"] == "P-9999"
     assert all(r["patient_id"] != "P-9999" for r in rows[1:])
+
+
+def test_sex_codes_converts_male_and_female(client):
+    use(client, "sex_codes")
+    sexes = {r["sex"] for r in client.get("/practice_a/patients").json()}
+    assert sexes == {"M", "F", "other"}
