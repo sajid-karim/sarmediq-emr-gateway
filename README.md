@@ -11,6 +11,7 @@ and can be replayed after a fix.
 
 - Architecture and every design decision, with diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - The vendor's documented contract and the undocumented changes it can switch on: [`mock_emr/CONTRACT.md`](mock_emr/CONTRACT.md)
+- Step-by-step `curl` walkthrough of every scenario, with expected results: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
 
 ## Quick start
 
@@ -31,6 +32,10 @@ make run                       # gateway on :8000       (GATEWAY_PORT=8100 MOCK_
 
 Or with Docker: `make up` (gateway on `:8000`, mock on `:9000`; override with `GATEWAY_PORT` /
 `MOCK_PORT`), `make down` to stop.
+
+If 8000 or 9000 is already in use, pick other ports, e.g.
+`MOCK_PORT=9200 make mock` and `MOCK_PORT=9200 GATEWAY_PORT=8200 make run`.
+The full walkthrough of every scenario is in [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md).
 
 A breaking change, end to end:
 
