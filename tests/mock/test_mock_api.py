@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -53,6 +55,18 @@ def test_unknown_practice_is_404(client):
 def test_updated_since_after_fixture_date_returns_nothing(client):
     response = client.get("/practice_a/patients", params={"updated_since": "2026-10-02T00:00:00Z"})
     assert response.json() == []
+
+
+def test_updated_since_without_timezone_is_400_not_500(client):
+    response = client.get("/practice_a/patients", params={"updated_since": "2026-10-05T00:00:00"})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("raw", [b"offset:-5", b"offset:abc", b"page:3", b"offset"])
+def test_bad_cursors_are_400(client, raw):
+    cursor = base64.urlsafe_b64encode(raw).decode()
+    assert client.get("/practice_a/patients", params={"cursor": cursor}).status_code == 400
+    assert client.get("/practice_a/patients", params={"cursor": "!!!"}).status_code == 400
 
 
 def test_breaking_renames_and_nests(client):

@@ -9,7 +9,7 @@ GET /{practice_id}/patients
 GET /{practice_id}/appointments
 GET /{practice_id}/reports
 
-Query:  limit=<1..100, default 10>  cursor=<opaque>  updated_since=<ISO-8601>
+Query:  limit=<1..100, default 10>  cursor=<opaque>  updated_since=<ISO-8601 with timezone>
 ```
 
 `practice_id` identifies the clinic. Record IDs are unique **within a practice only**.
@@ -26,7 +26,7 @@ X-Next-Cursor: <opaque>        ← absent on the last page
 | Status | Meaning |
 |---|---|
 | 200 | Success |
-| 400 | Invalid cursor |
+| 400 | Invalid cursor, or `updated_since` without a timezone |
 | 404 | Unknown practice or resource |
 | 429 | Rate limited; honour `Retry-After` (seconds) |
 | 5xx | Transient; safe to retry (all calls are GETs) |
@@ -92,3 +92,8 @@ GET  /_admin/scenario
 Fixtures: two practices (`practice_a`, `practice_b`) with 25 patients, 25 appointments and
 15 reports each, sharing ID ranges. All fixtures are "last modified" on 2026-10-01, so an
 `updated_since` at or after that date returns an empty list.
+
+Switching scenario does **not** change that date, just as a real vendor changing its response
+shape does not touch records' modified times. After a first sync, an incremental sync sees
+nothing new; use `full=true` (or a fresh tenant) to observe a scenario. In production this is
+why a periodic full/reconciliation sync is needed: drift only shows on records that change.

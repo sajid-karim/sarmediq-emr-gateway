@@ -50,9 +50,10 @@ def encode_cursor(offset: int) -> str:
 def decode_cursor(cursor: str) -> int:
     try:
         prefix, value = base64.urlsafe_b64decode(cursor.encode()).decode().split(":")
-        if prefix != "offset":
-            raise ValueError(prefix)
-        return int(value)
+        offset = int(value)
+        if prefix != "offset" or offset < 0:
+            raise ValueError(cursor)
+        return offset
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
 
@@ -80,6 +81,8 @@ def list_records(
 ) -> Response:
     if practice_id not in PRACTICES or resource not in RESOURCES:
         raise HTTPException(status_code=404, detail="not found")
+    if updated_since is not None and updated_since.tzinfo is None:
+        raise HTTPException(status_code=400, detail="updated_since must include a timezone")
 
     scenario = state.scenario
     call = state.next_call((practice_id, resource))
