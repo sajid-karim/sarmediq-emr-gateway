@@ -71,3 +71,48 @@ def test_dlq_endpoint(client, gateway):
     client.post("/sync/patient", params={"tenant": "practice_a"})
     [row] = client.get("/dlq").json()
     assert row["failure_code"] == "MALFORMED_RESPONSE"
+
+
+def test_read_api_uses_keyset_pagination(client):
+    client.post("/sync/patient", params={"tenant": "practice_a"})
+    seen, after, pages = [], None, 0
+    while True:
+        params = {"tenant": "practice_a", "limit": 10}
+        if after:
+            params["after"] = after
+        response = client.get("/patients", params=params)
+        seen += [row["vendor_id"] for row in response.json()]
+        pages += 1
+        after = response.headers.get("x-next-cursor")
+        if not after:
+            break
+    assert pages == 3 and len(seen) == 25 and seen == sorted(set(seen))
+    assert (
+        client.get("/patients", params={"tenant": "practice_a", "limit": 25}).headers.get(
+            "x-next-cursor"
+        )
+        is None
+    ), "an exact-size last page has no next cursor"
+
+
+def test_quarantine_listing_does_not_query_per_row(client, gateway):
+    from sqlalchemy import event
+
+    client.post("/sync/patient", params={"tenant": "practice_a"})
+    gateway.scenario("breaking")
+    client.post("/sync/patient", params={"tenant": "practice_b"})
+
+    statements = []
+    engine = gateway.services.engine
+    listener = lambda *args: statements.append(args[2])  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        rows = client.get("/quarantine").json()
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    assert len(rows) == 10 and all(row["incident_ids"] for row in rows)
+    assert len(statements) <= 3, "one query for rows + one for all their incidents, not 1 + N"
+
+
+def test_quarantine_status_is_validated(client):
+    assert client.get("/quarantine", params={"status": "bogus"}).status_code == 422

@@ -12,8 +12,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, TenantSeed
-from app.main import Services, build_acme_adapter, build_services
+from app.main import Services, build_services
 from app.sync.orchestrator import SyncOrchestrator
+from app.vendors.registry import build_acme_adapter
 from mock_emr.app import app as mock_app
 
 
@@ -60,7 +61,7 @@ class Gateway:
 
     @property
     def orchestrator(self) -> SyncOrchestrator:
-        return self.services.orchestrator
+        return self.services.orchestrators["acme"]
 
     def scenario(self, name: str, slow_seconds: float = 1.0) -> None:
         set_scenario(self.mock_url, name, slow_seconds)

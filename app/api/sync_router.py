@@ -16,7 +16,7 @@ def run_sync(
     services=Depends(get_services),
 ) -> JSONResponse:
     try:
-        report = services.orchestrator.sync(tenant, resource, full=full)
+        report = services.orchestrator_for(tenant).sync(tenant, resource, full=full)
     except UnknownTenantError as exc:
         raise HTTPException(status_code=404, detail=f"unknown tenant {exc}") from exc
     except SyncInProgressError as exc:

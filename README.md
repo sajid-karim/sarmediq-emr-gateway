@@ -67,9 +67,9 @@ e.g. `EMR_DATABASE_URL`, `EMR_VENDOR_BASE_URL`, `EMR_ACME_MAPPING_VERSION`, `EMR
 | `GET /drift`, `POST /drift/{id}/promote` | Detected schema changes; promote a reviewed shape to baseline |
 | `GET /quarantine?status=&resource=&tenant=` | Refused records/pages with diagnostics |
 | `GET /dlq` | Requests that never returned a usable page |
-| `POST /replay?scope=record\|page&tenant=&resource=&error_code=` | Re-process quarantined data from stored raw payloads |
+| `POST /replay?scope=record\|page&tenant=&vendor=&resource=&error_code=` | Re-process quarantined data from stored raw payloads (with several vendors configured, pass `tenant` or `vendor`) |
 | `POST /breaker/reset?tenant=&resource=` | Manual breaker reset |
-| `GET /patients`, `/appointments`, `/reports` (`?tenant=`), `GET /…/{id}` | Read the canonical data back |
+| `GET /patients`, `/appointments`, `/reports` (`?tenant=&limit=&after=`), `GET /…/{id}` | Read the canonical data back. Keyset paging: pass the `X-Next-Cursor` response header as `after` |
 
 ## How it works (short version)
 

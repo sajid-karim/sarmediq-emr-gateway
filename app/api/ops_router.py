@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_services, get_session, row_to_dict, tenant_id_for
 from app.core import breaker, drift
@@ -98,12 +98,18 @@ def promote_drift(event_id: int, session: Session = Depends(get_session)) -> dic
 
 @router.get("/quarantine")
 def list_quarantine(
-    status: str = Query(QuarantineStatus.QUARANTINED),
+    status: QuarantineStatus = QuarantineStatus.QUARANTINED,
     resource: Resource | None = None,
     tenant: str | None = None,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    query = select(Quarantine).where(Quarantine.status == status).order_by(Quarantine.id)
+    query = (
+        select(Quarantine)
+        .where(Quarantine.status == status)
+        .order_by(Quarantine.id)
+        # Load every row's incidents in one extra query, not one query per row (N+1).
+        .options(selectinload(Quarantine.incidents))
+    )
     if resource:
         query = query.where(Quarantine.resource == resource)
     if tenant:
@@ -125,12 +131,26 @@ def list_dlq(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
 def replay(
     scope: QuarantineScope = QuarantineScope.RECORD,
     tenant: str | None = None,
+    vendor: str | None = None,
     resource: Resource | None = None,
     error_code: ErrorCode | None = None,
     services=Depends(get_services),
 ) -> dict[str, Any]:
+    """Replay runs with one vendor's mapper, so it must know which vendor is meant."""
     try:
-        report = services.orchestrator.replay(
+        if tenant:
+            orchestrator = services.orchestrator_for(tenant)
+        elif vendor:
+            if vendor not in services.orchestrators:
+                raise HTTPException(status_code=404, detail=f"unknown vendor {vendor!r}")
+            orchestrator = services.orchestrators[vendor]
+        elif len(services.orchestrators) == 1:
+            [orchestrator] = services.orchestrators.values()
+        else:
+            raise HTTPException(
+                status_code=422, detail="several vendors are configured: pass tenant or vendor"
+            )
+        report = orchestrator.replay(
             scope=scope, tenant_name=tenant, resource=resource, error_code=error_code
         )
     except UnknownTenantError as exc:
@@ -142,10 +162,10 @@ def replay(
 def reset_breaker(
     tenant: str, resource: Resource, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
-    tenant_id = tenant_id_for(session, tenant)
-    vendor = session.scalar(select(Tenant.vendor).where(Tenant.id == tenant_id))
-    assert vendor is not None
-    state = breaker.get_or_create(session, vendor, tenant_id, resource)
+    row = session.scalar(select(Tenant).where(Tenant.name == tenant))
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"unknown tenant {tenant!r}")
+    state = breaker.get_or_create(session, row.vendor, row.id, resource)
     breaker.reset(state, "manual reset")
     session.commit()
     return {"tenant": tenant, "resource": resource, "state": state.state}

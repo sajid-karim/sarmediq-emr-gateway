@@ -1,20 +1,20 @@
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from fastapi import FastAPI
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api import ops_router, read_router, sync_router
 from app.config import Settings
+from app.db.models import Tenant
 from app.db.session import init_db, make_engine, make_session_factory, seed_tenants
 from app.logging import configure_logging
-from app.sync.orchestrator import SyncOrchestrator
-from app.vendors.acme.adapter import AcmeAdapter
-from app.vendors.acme.client import AcmeClient
+from app.sync.orchestrator import SyncOrchestrator, UnknownTenantError
 from app.vendors.base import VendorAdapter
+from app.vendors.registry import ADAPTER_FACTORIES
 
 
 @dataclass
@@ -22,37 +22,48 @@ class Services:
     settings: Settings
     engine: Engine
     session_factory: sessionmaker[Session]
-    orchestrator: SyncOrchestrator
+    orchestrators: dict[str, SyncOrchestrator]  # one per vendor, keyed by vendor name
+
+    def orchestrator_for(self, tenant_name: str) -> SyncOrchestrator:
+        """A tenant belongs to one vendor; that vendor's adapter does the talking."""
+        with self.session_factory() as session:
+            vendor = session.scalar(select(Tenant.vendor).where(Tenant.name == tenant_name))
+        if vendor is None:
+            raise UnknownTenantError(tenant_name)
+        if vendor not in self.orchestrators:
+            raise RuntimeError(f"tenant {tenant_name!r} uses vendor {vendor!r}, no adapter loaded")
+        return self.orchestrators[vendor]
 
     def close(self) -> None:
-        self.orchestrator.adapter.close()
+        for orchestrator in self.orchestrators.values():
+            orchestrator.adapter.close()
         self.engine.dispose()
-
-
-def build_acme_adapter(settings: Settings, mapping_version: int | None = None) -> AcmeAdapter:
-    client = AcmeClient(
-        settings.vendor_base_url,
-        page_size=settings.page_size,
-        connect_timeout=settings.connect_timeout,
-        read_timeout=settings.read_timeout,
-    )
-    return AcmeAdapter(client, mapping_version or settings.acme_mapping_version)
 
 
 def build_services(
     settings: Settings,
     *,
-    adapter: VendorAdapter | None = None,
+    adapters: Mapping[str, VendorAdapter] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Services:
+    vendors = {tenant.vendor for tenant in settings.tenants}
+    if adapters is None:
+        unsupported = vendors - ADAPTER_FACTORIES.keys()
+        if unsupported:
+            raise ValueError(f"no adapter registered for vendor(s): {sorted(unsupported)}")
+        adapters = {vendor: ADAPTER_FACTORIES[vendor](settings) for vendor in sorted(vendors)}
+    elif missing := vendors - adapters.keys():
+        raise ValueError(f"no adapter supplied for vendor(s): {sorted(missing)}")
+
     engine = make_engine(settings.database_url)
     init_db(engine)
     session_factory = make_session_factory(engine)
     seed_tenants(session_factory, settings.tenants)
-    orchestrator = SyncOrchestrator(
-        session_factory, adapter or build_acme_adapter(settings), settings, sleep=sleep
-    )
-    return Services(settings, engine, session_factory, orchestrator)
+    orchestrators = {
+        vendor: SyncOrchestrator(session_factory, adapter, settings, sleep=sleep)
+        for vendor, adapter in adapters.items()
+    }
+    return Services(settings, engine, session_factory, orchestrators)
 
 
 def create_app(services: Services | None = None) -> FastAPI:

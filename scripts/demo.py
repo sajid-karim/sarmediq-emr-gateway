@@ -21,8 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient`")
 
 from app.config import Settings  # noqa: E402
-from app.main import build_acme_adapter, build_services, create_app  # noqa: E402
+from app.main import build_services, create_app  # noqa: E402
 from app.sync.orchestrator import SyncOrchestrator  # noqa: E402
+from app.vendors.registry import build_acme_adapter  # noqa: E402
 from mock_emr.app import app as mock_app  # noqa: E402
 
 
@@ -114,7 +115,7 @@ def main() -> None:
 
     step("6. Engineer ships the fix: mapping_version 2 adds the approved aliases")
     fixed = build_acme_adapter(settings, mapping_version=2)
-    services.orchestrator = SyncOrchestrator(services.session_factory, fixed, settings)
+    services.orchestrators["acme"] = SyncOrchestrator(services.session_factory, fixed, settings)
     with TestClient(create_app(services)) as api:
         report = api.post("/replay", params={"resource": "patient"}).json()
         show("replay from stored raw (no vendor call)", report)

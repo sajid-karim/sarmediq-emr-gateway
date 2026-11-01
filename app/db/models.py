@@ -142,7 +142,10 @@ class CanonicalRow:
 
 class PatientRow(CanonicalRow, Base):
     __tablename__ = "patient"
-    __table_args__ = (UniqueConstraint("vendor", "tenant_id", "vendor_id"),)
+    __table_args__ = (
+        UniqueConstraint("vendor", "tenant_id", "vendor_id"),
+        Index("ix_patient_tenant_vendor_id", "tenant_id", "vendor_id"),  # keyset paging
+    )
 
     mrn: Mapped[str] = mapped_column(String(100))
     dob: Mapped[date]
@@ -158,7 +161,10 @@ class PatientRow(CanonicalRow, Base):
 
 class AppointmentRow(CanonicalRow, Base):
     __tablename__ = "appointment"
-    __table_args__ = (UniqueConstraint("vendor", "tenant_id", "vendor_id"),)
+    __table_args__ = (
+        UniqueConstraint("vendor", "tenant_id", "vendor_id"),
+        Index("ix_appointment_tenant_vendor_id", "tenant_id", "vendor_id"),  # keyset paging
+    )
 
     patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"))
     vendor_patient_id: Mapped[str] = mapped_column(String(100))
@@ -172,7 +178,10 @@ class AppointmentRow(CanonicalRow, Base):
 
 class ClinicalReportRow(CanonicalRow, Base):
     __tablename__ = "clinical_report"
-    __table_args__ = (UniqueConstraint("vendor", "tenant_id", "vendor_id"),)
+    __table_args__ = (
+        UniqueConstraint("vendor", "tenant_id", "vendor_id"),
+        Index("ix_clinical_report_tenant_vendor_id", "tenant_id", "vendor_id"),  # keyset paging
+    )
 
     patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"))
     vendor_patient_id: Mapped[str] = mapped_column(String(100))
@@ -197,6 +206,7 @@ TABLE_BY_RESOURCE: dict[Resource, type[CanonicalRow]] = {
 
 class Incident(Base):
     __tablename__ = "incident"
+    __table_args__ = (Index("ix_incident_stream", "tenant_id", "resource", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_key: Mapped[str] = mapped_column(String(500), unique=True)
@@ -206,7 +216,7 @@ class Incident(Base):
     error_code: Mapped[str] = mapped_column(String(50))
     field_path: Mapped[str] = mapped_column(String(200), default="")
     severity: Mapped[str] = mapped_column(String(20))
-    status: Mapped[str] = mapped_column(String(20), default=IncidentStatus.OPEN)
+    status: Mapped[str] = mapped_column(String(20), default=IncidentStatus.OPEN, index=True)
     count: Mapped[int] = mapped_column(default=0)
     first_seen: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(default=utcnow)
@@ -225,6 +235,10 @@ quarantine_incident = Table(
 
 class Quarantine(Base):
     __tablename__ = "quarantine"
+    __table_args__ = (
+        Index("ix_quarantine_stream", "tenant_id", "resource", "status"),
+        Index("ix_quarantine_record", "tenant_id", "resource", "vendor_record_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     vendor: Mapped[str] = mapped_column(String(50))
@@ -239,7 +253,9 @@ class Quarantine(Base):
     detail: Mapped[list[Any]] = mapped_column(default=list)
     fingerprint_diff: Mapped[dict[str, Any] | None]
     mapping_version: Mapped[int]
-    status: Mapped[str] = mapped_column(String(20), default=QuarantineStatus.QUARANTINED)
+    status: Mapped[str] = mapped_column(
+        String(20), default=QuarantineStatus.QUARANTINED, index=True
+    )
     attempts: Mapped[int] = mapped_column(default=0)
     first_seen: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(default=utcnow)
@@ -250,7 +266,10 @@ class Quarantine(Base):
 
 class PendingRecord(Base):
     __tablename__ = "pending_record"
-    __table_args__ = (UniqueConstraint("vendor", "tenant_id", "resource", "vendor_id"),)
+    __table_args__ = (
+        UniqueConstraint("vendor", "tenant_id", "resource", "vendor_id"),
+        Index("ix_pending_waiting", "tenant_id", "waiting_on_resource", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     vendor: Mapped[str] = mapped_column(String(50))
@@ -282,7 +301,7 @@ class RequestDLQ(Base):
     raw_payload_id: Mapped[int | None] = mapped_column(ForeignKey("raw_payload.id"))
     incident_id: Mapped[int | None] = mapped_column(ForeignKey("incident.id"))
     detail: Mapped[str | None] = mapped_column(String(1000))
-    status: Mapped[str] = mapped_column(String(20), default=DlqStatus.OPEN)
+    status: Mapped[str] = mapped_column(String(20), default=DlqStatus.OPEN, index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     resolved_at: Mapped[datetime | None]
 
@@ -315,7 +334,7 @@ class DriftEvent(Base):
     first_seen_tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"))
     diff: Mapped[dict[str, Any]]
     raw_payload_id: Mapped[int] = mapped_column(ForeignKey("raw_payload.id"))
-    status: Mapped[str] = mapped_column(String(20), default=DriftStatus.NEW)
+    status: Mapped[str] = mapped_column(String(20), default=DriftStatus.NEW, index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     fingerprint: Mapped[SchemaFingerprint] = relationship()
