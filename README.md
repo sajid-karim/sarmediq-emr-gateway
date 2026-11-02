@@ -72,6 +72,9 @@ e.g. `EMR_DATABASE_URL`, `EMR_VENDOR_BASE_URL`, `EMR_ACME_MAPPING_VERSION`, `EMR
 | `POST /breaker/reset?tenant=&resource=` | Manual breaker reset |
 | `GET /patients`, `/appointments`, `/reports` (`?tenant=&limit=&after=`), `GET /…/{id}` | Read the canonical data back. Keyset paging: pass the `X-Next-Cursor` response header as `after` |
 
+All list endpoints (`/incidents`, `/drift`, `/quarantine`, `/dlq` and the read API) page the same way:
+`limit` (default 100, max 1000) and `after` = the `X-Next-Cursor` header from the previous page.
+
 ## How it works (short version)
 
 ```
@@ -200,3 +203,40 @@ Built for clarity within the time box; designed for the rest (architecture doc �
   documented contract.
 - Not built: token-bucket throttling, alias-suggestion engine, second vendor adapter, deletions,
   queue/workers/Redis/object storage, metrics, PHI controls.
+
+## Known gaps
+
+Found in a final self-review. None of them writes incorrect clinical data; each has a known fix.
+
+**Correctness (low likelihood)**
+- **Replay takes no lock.** A replay running alongside a sync (or a second replay) may process the
+  same rows twice. The idempotent upsert keeps the data correct; only report counts can be off.
+  Fix: take the run lock for each (tenant, resource) stream the replay touches.
+- **A malformed element with no ID** (`null` in the array) is quarantined but can never be
+  superseded by a later good record, because nothing links it to a patient. Fix: an operator
+  "dismiss" action with an audit trail.
+- **Explicit `null` on an important/optional field clears the stored value with no incident.**
+  A vendor bug that suddenly nulls every phone number would go unnoticed (drift ignores nulls).
+  Fix: track the null rate per field and alert on sudden jumps.
+- **Shape changes don't change modified dates**, so an incremental sync only sees drift on records
+  that changed. `full=true` covers it on demand; production needs a scheduled full
+  reconciliation (see `docs/SYSTEM_DESIGN.md`).
+- **Mapping versions alias paths, not enum values.** Accepting e.g. `M`/`F` for sex (the
+  `sex_codes` scenario) needs a small per-version value-alias table in the mapper.
+- **Info-level incidents never auto-close**; deciding when "missing optional field" is resolved is
+  a product decision.
+- **The gateway's own API has no authentication.** Production puts it behind an identity provider:
+  OAuth2 client credentials for schedulers, scopes per action (`sync:run`, `ops:replay`,
+  `phi:read`) and a tenant claim so a caller only sees its own tenants.
+
+**Mock vendor limits (test tooling, not the gateway)**
+- The active scenario is global (all practices at once) and call counters live in one process,
+  so failure patterns are deterministic only against a single mock instance.
+
+**Performance (fine at this scale)**
+- **4–6 queries per record** (existing row, parent, ledger, quarantine and pending checks).
+  Fix: load a page's existing rows and parents with one `WHERE vendor_id IN (...)` query. Left
+  as is on purpose: it touches the write path's concurrency guarantees, and at 10 records a page
+  the cost is milliseconds.
+- **Replay loads every matching quarantine row at once** and works through them in one call.
+  Fix: replay in batches (and in a background worker in production).
