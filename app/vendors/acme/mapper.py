@@ -168,6 +168,11 @@ class AcmeMapper:
         if spec.kind is FieldKind.ENUM:
             assert spec.enum_map is not None
             if value not in spec.enum_map:
-                return problem(ErrorCode.UNKNOWN_ENUM_VALUE, value)
+                # Name the allowed values, so the incident is actionable without the source.
+                allowed = f"one of: {', '.join(spec.enum_map)}"
+                issue = MappingIssue(
+                    ErrorCode.UNKNOWN_ENUM_VALUE, spec.path, spec.criticality, allowed, value
+                )
+                return None, issue
             return spec.enum_map[value], None
         raise AssertionError(f"unhandled field kind {spec.kind}")

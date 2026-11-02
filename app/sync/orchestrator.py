@@ -78,6 +78,7 @@ STREAM_CODES = (
     ErrorCode.MALFORMED_RESPONSE,
     ErrorCode.CONTRACT_OR_AUTH,
     ErrorCode.PAGINATION_LOOP,
+    ErrorCode.INTERNAL_ERROR,
 )
 
 
@@ -89,6 +90,10 @@ class SyncStatus(StrEnum):
 
 class SyncInProgressError(Exception):
     pass
+
+
+class LockLostError(Exception):
+    """This run's lock went stale and another run took over the stream."""
 
 
 class UnknownTenantError(Exception):
@@ -205,7 +210,18 @@ class SyncOrchestrator:
             checkpoint = self._acquire_lock(session, tenant, resource, run_id, full)
             log.info("sync.started", resume_cursor=checkpoint.cursor, full=full)
             try:
-                self._run_pages(session, tenant, resource, checkpoint, report)
+                self._run_pages(session, tenant, resource, checkpoint, run_id, report)
+            except LockLostError:
+                # Another run took over after our lock went stale. It owns the stream now;
+                # we stop without advancing anything. Not a vendor failure: no breaker change.
+                session.rollback()
+                report.status = SyncStatus.HALTED
+                report.halt_reason = "run lock lost: another run took over this stream"
+                log.warning("sync.lock_lost")
+            except Exception as exc:
+                session.rollback()
+                self._record_internal_error(session, tenant, resource, exc)
+                raise
             finally:
                 session.rollback()
                 session.execute(
@@ -275,12 +291,55 @@ class SyncOrchestrator:
         session.commit()
         return checkpoint
 
+    def _save_checkpoint(
+        self, session: Session, checkpoint: SyncCheckpoint, run_id: str, **values: Any
+    ) -> None:
+        """Fenced checkpoint write: only applies while this run still owns the lock.
+
+        If our lock went stale and another run took over, a plain ORM update would let this
+        (zombie) run overwrite the new owner's cursor. The run_id condition turns that into
+        0 rows matched, and we stop instead.
+        """
+        result = session.execute(
+            update(SyncCheckpoint)
+            .where(SyncCheckpoint.id == checkpoint.id, SyncCheckpoint.run_id == run_id)
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            raise LockLostError(f"run {run_id} no longer owns checkpoint {checkpoint.id}")
+
+    def _record_internal_error(
+        self, session: Session, tenant: TenantRef, resource: Resource, exc: Exception
+    ) -> None:
+        """An unexpected bug or infrastructure error stopped the run: make it visible.
+
+        Opens an incident and counts a breaker failure, so repeated crashes stop the stream
+        like repeated upstream failures do. Never masks the original exception.
+        """
+        try:
+            incident = self._incident(
+                session,
+                tenant,
+                resource,
+                ErrorCode.INTERNAL_ERROR,
+                detail={"exception": type(exc).__name__, "message": str(exc)[:500]},
+            )
+            state = breaker.get_or_create(session, self.adapter.vendor, tenant.id, resource)
+            threshold = self._settings.breaker_failure_threshold
+            breaker.record_failure(state, ErrorCode.INTERNAL_ERROR, incident.id, threshold)
+            session.commit()
+        except Exception:  # the DB itself may be what failed; the original error matters more
+            session.rollback()
+            log.exception("sync.internal_error_not_recorded")
+        log.error("sync.internal_error", exception=type(exc).__name__, message=str(exc)[:500])
+
     def _run_pages(
         self,
         session: Session,
         tenant: TenantRef,
         resource: Resource,
         checkpoint: SyncCheckpoint,
+        run_id: str,
         report: SyncReport,
     ) -> None:
         vendor = self.adapter.vendor
@@ -368,13 +427,19 @@ class SyncOrchestrator:
                 return
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-            checkpoint.cursor = next_cursor
-            checkpoint.heartbeat_at = self._clock()
+            self._save_checkpoint(
+                session, checkpoint, run_id, cursor=next_cursor, heartbeat_at=self._clock()
+            )
             session.commit()
 
-        checkpoint.cursor = None
-        checkpoint.last_success_started_at = checkpoint.run_started_at
-        checkpoint.run_updated_since = None
+        self._save_checkpoint(
+            session,
+            checkpoint,
+            run_id,
+            cursor=None,
+            last_success_started_at=checkpoint.run_started_at,
+            run_updated_since=None,
+        )
         breaker.record_success(breaker.get_or_create(session, vendor, tenant.id, resource))
         self._close_stream_incidents(session, tenant.id, resource, STREAM_CODES, "run completed")
         session.commit()

@@ -6,6 +6,8 @@ class ErrorCode(StrEnum):
     MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
     CONTRACT_OR_AUTH = "CONTRACT_OR_AUTH"
     UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE"
+    # Run level: a bug or infrastructure failure inside the gateway, not the vendor's fault.
+    INTERNAL_ERROR = "INTERNAL_ERROR"
     # Page level.
     ENVELOPE_CHANGED = "ENVELOPE_CHANGED"
     PAGINATION_LOOP = "PAGINATION_LOOP"

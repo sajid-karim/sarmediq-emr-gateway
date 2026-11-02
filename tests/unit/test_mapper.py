@@ -72,6 +72,13 @@ def test_unknown_enum_is_never_mapped_to_a_neighbour(v1):
     assert (ErrorCode.UNKNOWN_ENUM_VALUE, "status") in codes(result)
 
 
+def test_unknown_enum_issue_names_the_allowed_values(v1):
+    result = v1.map_record(Resource.PATIENT, patient(sex="M"))
+    [issue] = result.issues
+    assert issue.code is ErrorCode.UNKNOWN_ENUM_VALUE and issue.actual == "M"
+    assert issue.expected == "one of: male, female, other, unknown"
+
+
 def test_datetime_without_timezone_is_bad_format(v1):
     row = records("practice_a", "appointments")[0]
     row["start_time"] = "2026-11-02T09:00:00"
