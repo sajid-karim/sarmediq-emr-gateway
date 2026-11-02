@@ -9,6 +9,7 @@ The one rule behind every decision: **nothing we don't understand reaches the cl
 Harmless changes are accepted (and reported); dangerous ones are quarantined with full evidence
 and can be replayed after a fix.
 
+- System design diagrams (current system, one sync run, production): [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md)
 - Architecture and every design decision, with diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - The vendor's documented contract and the undocumented changes it can switch on: [`mock_emr/CONTRACT.md`](mock_emr/CONTRACT.md)
 - Step-by-step `curl` walkthrough of every scenario, with expected results: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
