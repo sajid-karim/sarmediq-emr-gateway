@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
@@ -31,6 +31,24 @@ from app.db.models import (
 from app.sync.orchestrator import UnknownTenantError
 
 router = APIRouter(tags=["ops"])
+
+# Lists page with keyset pagination on the primary key, like the read API:
+# `?after=<last id seen>`, next cursor in `X-Next-Cursor`. These tables grow with every incident
+# and quarantined record, so an unbounded list would get slower and bigger over time.
+Limit = Query(100, ge=1, le=1000)
+After = Query(None, description="X-Next-Cursor from the previous page")
+
+
+def _page(
+    session: Session, query: Any, model: Any, response: Response, limit: int, after: int | None
+) -> list[Any]:
+    if after is not None:
+        query = query.where(model.id > after)
+    # One extra row tells us whether a next page exists, without a COUNT query.
+    rows = list(session.scalars(query.order_by(model.id).limit(limit + 1)))
+    if len(rows) > limit:
+        response.headers["X-Next-Cursor"] = str(rows[limit - 1].id)
+    return rows[:limit]
 
 
 @router.get("/health")
@@ -72,18 +90,27 @@ def health(session: Session = Depends(get_session)) -> dict[str, Any]:
 
 @router.get("/incidents")
 def list_incidents(
+    response: Response,
     status: str = Query("open", pattern="^(open|closed|all)$"),
+    limit: int = Limit,
+    after: int | None = After,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    query = select(Incident).order_by(Incident.id)
+    query = select(Incident)
     if status != "all":
         query = query.where(Incident.status == status)
-    return [row_to_dict(row) for row in session.scalars(query)]
+    return [row_to_dict(row) for row in _page(session, query, Incident, response, limit, after)]
 
 
 @router.get("/drift")
-def list_drift(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return [row_to_dict(row) for row in session.scalars(select(DriftEvent).order_by(DriftEvent.id))]
+def list_drift(
+    response: Response,
+    limit: int = Limit,
+    after: int | None = After,
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = _page(session, select(DriftEvent), DriftEvent, response, limit, after)
+    return [row_to_dict(row) for row in rows]
 
 
 @router.post("/drift/{event_id}/promote")
@@ -98,15 +125,17 @@ def promote_drift(event_id: int, session: Session = Depends(get_session)) -> dic
 
 @router.get("/quarantine")
 def list_quarantine(
+    response: Response,
     status: QuarantineStatus = QuarantineStatus.QUARANTINED,
     resource: Resource | None = None,
     tenant: str | None = None,
+    limit: int = Limit,
+    after: int | None = After,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     query = (
         select(Quarantine)
         .where(Quarantine.status == status)
-        .order_by(Quarantine.id)
         # Load every row's incidents in one extra query, not one query per row (N+1).
         .options(selectinload(Quarantine.incidents))
     )
@@ -115,7 +144,7 @@ def list_quarantine(
     if tenant:
         query = query.where(Quarantine.tenant_id == tenant_id_for(session, tenant))
     rows = []
-    for row in session.scalars(query):
+    for row in _page(session, query, Quarantine, response, limit, after):
         item = row_to_dict(row)
         item["incident_ids"] = [incident.id for incident in row.incidents]
         rows.append(item)
@@ -123,8 +152,14 @@ def list_quarantine(
 
 
 @router.get("/dlq")
-def list_dlq(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return [row_to_dict(row) for row in session.scalars(select(RequestDLQ).order_by(RequestDLQ.id))]
+def list_dlq(
+    response: Response,
+    limit: int = Limit,
+    after: int | None = After,
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = _page(session, select(RequestDLQ), RequestDLQ, response, limit, after)
+    return [row_to_dict(row) for row in rows]
 
 
 @router.post("/replay")

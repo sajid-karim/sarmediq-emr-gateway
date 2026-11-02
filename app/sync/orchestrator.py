@@ -21,7 +21,7 @@ from typing import Any
 import structlog
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.config import Settings
 from app.core import breaker, drift, incidents, pending, quarantine
@@ -799,9 +799,10 @@ class SyncOrchestrator:
             tenant_id=tenant.id,
             parent_resource=Resource.PATIENT,
         )
+        pages: dict[int, list[Any]] = {}
         for row in rows:
             resource = Resource(row.resource)
-            raw = self._load_record(session, row.raw_payload_id, resource, row.record_index)
+            raw = self._load_record(session, row.raw_payload_id, resource, row.record_index, pages)
             result = self._process_record(
                 session, tenant, resource, raw, row.record_index, row.raw_payload_id, None, None
             )
@@ -876,6 +877,8 @@ class SyncOrchestrator:
                 query = query.where(Quarantine.tenant_id == tenant.id)
             if resource:
                 query = query.where(Quarantine.resource == resource)
+            # Incidents for every row in one extra query instead of one per row.
+            query = query.options(selectinload(Quarantine.incidents))
             rows = [
                 row
                 for row in session.scalars(query.order_by(Quarantine.id)).all()
@@ -889,15 +892,20 @@ class SyncOrchestrator:
             )
             touched_incidents: list[int] = []
             touched_streams: set[tuple[int, str]] = set()
+            tenants: dict[int, TenantRef] = {}
+            # Records quarantined from the same page share one stored payload: parse it once.
+            pages: dict[int, list[Any]] = {}
             for row in rows:
                 report.replayed += 1
                 touched_streams.add((row.tenant_id, row.resource))
                 touched_incidents += [incident.id for incident in row.incidents]
-                tenant = self._tenant_by_id(session, row.tenant_id)
+                if row.tenant_id not in tenants:
+                    tenants[row.tenant_id] = self._tenant_by_id(session, row.tenant_id)
+                tenant = tenants[row.tenant_id]
                 if scope is QuarantineScope.PAGE:
                     self._replay_page(session, tenant, row, report)
                 else:
-                    self._replay_record(session, tenant, row, report)
+                    self._replay_record(session, tenant, row, report, pages)
 
             incidents.close_if_drained(session, touched_incidents)
             for tenant_id, resource_name in sorted(touched_streams):
@@ -916,12 +924,17 @@ class SyncOrchestrator:
         return report
 
     def _replay_record(
-        self, session: Session, tenant: TenantRef, row: Quarantine, report: ReplayReport
+        self,
+        session: Session,
+        tenant: TenantRef,
+        row: Quarantine,
+        report: ReplayReport,
+        pages: dict[int, list[Any]],
     ) -> None:
         resource = Resource(row.resource)
         assert row.record_index is not None
         try:
-            raw = self._load_record(session, row.raw_payload_id, resource, row.record_index)
+            raw = self._load_record(session, row.raw_payload_id, resource, row.record_index, pages)
         except EnvelopeError:
             row.attempts += 1
             report.still_quarantined += 1
@@ -1004,12 +1017,23 @@ class SyncOrchestrator:
             incidents.close_incident(incident, reason)
 
     def _load_record(
-        self, session: Session, raw_payload_id: int, resource: Resource, index: int
+        self,
+        session: Session,
+        raw_payload_id: int,
+        resource: Resource,
+        index: int,
+        pages: dict[int, list[Any]],
     ) -> Any:
-        raw_payload = session.get(RawPayload, raw_payload_id)
-        assert raw_payload is not None
-        page = self.adapter.parse_page(resource, json.loads(raw_payload.body), {})
-        return page.records[index]
+        """One record from a stored page. `pages` caches parsed pages for the caller's loop.
+
+        Safe to share: the mapper only reads raw records, it never modifies them.
+        """
+        if raw_payload_id not in pages:
+            raw_payload = session.get(RawPayload, raw_payload_id)
+            assert raw_payload is not None
+            body = json.loads(raw_payload.body)
+            pages[raw_payload_id] = self.adapter.parse_page(resource, body, {}).records
+        return pages[raw_payload_id][index]
 
     def _tenant_by_id(self, session: Session, tenant_id: int) -> TenantRef:
         tenant = session.get(Tenant, tenant_id)

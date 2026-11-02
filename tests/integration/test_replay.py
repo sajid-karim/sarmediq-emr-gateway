@@ -89,3 +89,20 @@ def test_envelope_page_replay(gateway):
     finished = fixed.sync("practice_b", Resource.PATIENT)
     assert finished.status is SyncStatus.COMPLETED
     assert gateway.count(PatientRow, PatientRow.tenant_id == 2) == 25
+
+
+def test_replay_parses_each_stored_page_once(gateway, monkeypatch):
+    """10 quarantined records from one page: one parse of that page, not ten."""
+    break_practice_b(gateway)
+    fixed = gateway.with_mapping_version(2)
+    parsed = []
+    real_parse = fixed.adapter.parse_page
+
+    def counting_parse(*args, **kwargs):
+        parsed.append(1)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(fixed.adapter, "parse_page", counting_parse)
+    report = fixed.replay(tenant_name="practice_b")
+    assert (report.replayed, report.resolved) == (10, 10)
+    assert len(parsed) == 1

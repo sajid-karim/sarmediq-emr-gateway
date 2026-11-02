@@ -116,3 +116,26 @@ def test_quarantine_listing_does_not_query_per_row(client, gateway):
 
 def test_quarantine_status_is_validated(client):
     assert client.get("/quarantine", params={"status": "bogus"}).status_code == 422
+
+
+def test_ops_lists_use_keyset_pagination(client, gateway):
+    client.post("/sync/patient", params={"tenant": "practice_a"})
+    gateway.scenario("breaking")
+    client.post("/sync/patient", params={"tenant": "practice_b"})
+
+    ids, after, pages = [], None, 0
+    while True:
+        params = {"limit": 4, **({"after": after} if after else {})}
+        response = client.get("/quarantine", params=params)
+        ids += [row["id"] for row in response.json()]
+        pages += 1
+        after = response.headers.get("x-next-cursor")
+        if not after:
+            break
+    assert pages == 3 and len(ids) == 10 and ids == sorted(set(ids))
+
+    first = client.get("/incidents", params={"limit": 1})
+    assert len(first.json()) == 1 and first.headers.get("x-next-cursor")
+    rest = client.get("/incidents", params={"after": first.headers["x-next-cursor"]}).json()
+    assert first.json()[0]["id"] not in {row["id"] for row in rest}
+    assert client.get("/dlq", params={"limit": 0}).status_code == 422
